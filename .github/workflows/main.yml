@@ -208,9 +208,9 @@ jobs:
 
               // To add a tool: add one line here + create its Activity + list it in the manifest.
               private val tools = listOf(
-                  Triple("ðŸ“µ  Call Blocker", "Block calls by prefix and see what was blocked", BlockerActivity::class.java),
-                  Triple("ðŸ“Š  Data Usage", "See which apps are using your data", DataUsageActivity::class.java),
-                  Triple("â¬‡ï¸  Downloader", "Download videos or audio from links", DownloaderActivity::class.java),
+                  Triple("📵  Call Blocker", "Block calls by prefix and see what was blocked", BlockerActivity::class.java),
+                  Triple("📊  Data Usage", "See which apps are using your data", DataUsageActivity::class.java),
+                  Triple("⬇️  Downloader", "Download videos or audio from links", DownloaderActivity::class.java),
               )
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -266,7 +266,7 @@ jobs:
 
               private fun refresh() {
                   val held = getSystemService(RoleManager::class.java).isRoleHeld(role)
-                  status.text = if (held) "Status: ACTIVE âœ…" else "Status: NOT ACTIVE. Tap Turn on blocking."
+                  status.text = if (held) "Status: ACTIVE ✅" else "Status: NOT ACTIVE. Tap Turn on blocking."
                   log.text = getSharedPreferences("log", MODE_PRIVATE)
                       .getString("entries", "").orEmpty()
                       .ifEmpty { "No calls seen yet." }
@@ -404,7 +404,7 @@ jobs:
                       out.text = "Needs Usage access.\n\nTap Grant usage access, find Toolkit, turn it on, then come back."
                       return
                   }
-                  out.text = "Loadingâ€¦"
+                  out.text = "Loading…"
                   Thread {
                       val result = try { report() } catch (e: Exception) { "Error: " + e.message }
                       runOnUiThread { out.text = result }
@@ -481,4 +481,149 @@ jobs:
           import android.app.Activity
           import android.content.ContentValues
           import android.content.Intent
-          impo
+          import android.os.Bundle
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.webkit.MimeTypeMap
+          import android.widget.EditText
+          import android.widget.TextView
+          import com.yausername.ffmpeg.FFmpeg
+          import com.yausername.youtubedl_android.YoutubeDL
+          import com.yausername.youtubedl_android.YoutubeDLRequest
+          import java.io.File
+
+          class DownloaderActivity : Activity() {
+
+              companion object {
+                  @Volatile var ready = false
+                  @Volatile var busy = false
+              }
+
+              private lateinit var input: EditText
+              private lateinit var status: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  page {
+                      text("Downloader", 22f)
+                      text("Paste a link, or tap Share → Download with Toolkit in any app.", 13f)
+                      input = EditText(context).apply {
+                          hint = "https://…"
+                          isSingleLine = true
+                      }.also { addView(it) }
+                      row {
+                          button("Video") { download(false) }
+                          button("Audio (mp3)") { download(true) }
+                      }
+                      button("Update yt-dlp") { update() }
+                      status = text("Files save to Download/Toolkit")
+                  }
+                  handleShare(intent)
+              }
+
+              private fun handleShare(i: Intent?) {
+                  if (i?.action != Intent.ACTION_SEND) return
+                  val shared = i.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+                  val url = Regex("https?://\\S+").find(shared)?.value
+                  if (url == null) {
+                      status.text = "No link found in what was shared."
+                  } else {
+                      input.setText(url)
+                      download(false)
+                  }
+              }
+
+              private fun ensureReady() {
+                  if (ready) return
+                  YoutubeDL.getInstance().init(applicationContext)
+                  FFmpeg.getInstance().init(applicationContext)
+                  ready = true
+              }
+
+              private fun download(audioOnly: Boolean) {
+                  val url = input.text.toString().trim()
+                  if (!url.startsWith("http")) { status.text = "Paste a valid link first."; return }
+                  if (busy) { status.text = "Busy, wait for the current job to finish."; return }
+                  busy = true
+                  status.text = "Starting… (first run takes a bit longer)"
+
+                  Thread {
+                      val msg = try {
+                          ensureReady()
+                          val tmp = File(cacheDir, "dl").apply { deleteRecursively(); mkdirs() }
+                          val req = YoutubeDLRequest(url).apply {
+                              addOption("-o", tmp.absolutePath + "/%(title).80s [%(id)s].%(ext)s")
+                              addOption("--no-mtime")
+                              addOption("--no-playlist")
+                              if (audioOnly) {
+                                  addOption("-x")
+                                  addOption("--audio-format", "mp3")
+                              } else {
+                                  addOption("-f", "bv*+ba/b")
+                                  addOption("--merge-output-format", "mp4")
+                              }
+                          }
+                          YoutubeDL.getInstance().execute(req) { progress, eta, _ ->
+                              val pct = progress.coerceAtLeast(0f).toInt()
+                              runOnUiThread { status.text = "Downloading… " + pct + "%  (" + eta + "s left)" }
+                          }
+                          val files = tmp.listFiles().orEmpty().filter {
+                              it.isFile && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl")
+                          }
+                          val saved = files.map { saveToDownloads(it) }
+                          if (saved.isEmpty()) "Finished, but no file was produced."
+                          else "✅ Saved to Download/Toolkit:\n\n" + saved.joinToString("\n")
+                      } catch (e: Exception) {
+                          "❌ Failed: " + (e.message ?: e.toString()).take(500) +
+                              "\n\nTip: tap Update yt-dlp, then try again."
+                      }
+                      busy = false
+                      runOnUiThread { status.text = msg }
+                  }.start()
+              }
+
+              private fun saveToDownloads(f: File): String {
+                  val mime = MimeTypeMap.getSingleton()
+                      .getMimeTypeFromExtension(f.extension.lowercase()) ?: "application/octet-stream"
+                  val values = ContentValues().apply {
+                      put(MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+                      put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                      put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Toolkit")
+                  }
+                  val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                      ?: error("Could not create file in Downloads")
+                  contentResolver.openOutputStream(uri)!!.use { out -> f.inputStream().use { it.copyTo(out) } }
+                  f.delete()
+                  return f.name
+              }
+
+              private fun update() {
+                  if (busy) { status.text = "Busy, try again in a moment."; return }
+                  busy = true
+                  status.text = "Updating yt-dlp…"
+                  Thread {
+                      val msg = try {
+                          ensureReady()
+                          val result = YoutubeDL.getInstance().updateYoutubeDL(applicationContext)
+                          "yt-dlp update: " + (result?.name ?: "done")
+                      } catch (e: Exception) {
+                          "Update failed: " + e.message
+                      }
+                      busy = false
+                      runOnUiThread { status.text = msg }
+                  }.start()
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: |
+          gradle assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk toolkit.apk
+
+      - name: Publish download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Toolkit build ${{ github.run_number }}
+          files: toolkit.apk
